@@ -1,0 +1,232 @@
+x-common: &common
+  build:
+    context: ./builder/
+  restart: unless-stopped
+  networks:
+    - frappe_network
+  volumes:
+    - sites:/home/frappe/frappe-bench/sites
+    - logs:/home/frappe/frappe-bench/logs
+
+services:
+  backend:
+    <<: *common
+    depends_on:
+      create-site:
+        condition: service_completed_successfully
+      redis-cache:
+        condition: service_healthy
+      redis-queue:
+        condition: service_healthy
+    environment:
+      DB_HOST: ${DB_HOST}
+      DB_PORT: ${DB_PORT}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MARIADB_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+
+  setup:
+    <<: *common
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis-cache:
+        condition: service_healthy
+      redis-queue:
+        condition: service_healthy
+    command:
+      - bash
+      - -c
+      - |
+        set -e
+        echo " Starting Frappe Configuration Setup ==="
+        
+        # List apps
+        ls -1 apps > sites/apps.txt
+        echo "Apps listed in sites/apps.txt"
+        
+        # Configure database
+        echo "Setting db_host to: ${DB_HOST}"
+        bench set-config -g db_host "${DB_HOST}"
+        
+        echo "Setting db_port to: ${DB_PORT}"
+        bench set-config -gp db_port "${DB_PORT}"
+        
+        # Configure Redis
+        echo "Setting redis_cache to: redis://${REDIS_CACHE}"
+        bench set-config -g redis_cache "redis://${REDIS_CACHE}"
+        
+        echo "Setting redis_queue to: redis://${REDIS_QUEUE}"
+        bench set-config -g redis_queue "redis://${REDIS_QUEUE}"
+        
+        echo "Setting redis_socketio to: redis://${REDIS_QUEUE}"
+        bench set-config -g redis_socketio "redis://${REDIS_QUEUE}"
+        
+        echo "Setting socketio_port to: ${SOCKETIO_PORT}"
+        bench set-config -gp socketio_port "${SOCKETIO_PORT}"
+        
+        echo "=== Configuration Complete ==="
+        echo "Contents of common_site_config.json:"
+        cat sites/common_site_config.json
+    environment:
+      DB_HOST: ${DB_HOST}
+      DB_PORT: ${DB_PORT}
+      REDIS_CACHE: ${REDIS_CACHE}
+      REDIS_QUEUE: ${REDIS_QUEUE}
+      SOCKETIO_PORT: ${SOCKETIO_PORT}
+
+  create-site:
+    <<: *common
+    restart: "no"
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+      db:
+        condition: service_healthy
+      redis-cache:
+        condition: service_healthy
+      redis-queue:
+        condition: service_healthy
+    command:
+      - bash
+      - -c
+      - |
+        set -e
+        
+        echo "=== Site Creation Starting ==="
+        echo "Checking configuration..."
+        cat sites/common_site_config.json
+        
+        if [ -d "sites/dev.localhost" ]; then
+          echo "Site dev.localhost already exists"
+          exit 0
+        fi
+        
+        echo "Creating new site dev.localhost..."
+        bench new-site dev.localhost \
+          --mariadb-user-host-login-scope='%' \
+          --admin-password="${ADMIN_PASSWORD}" \
+          --db-root-username=root \
+          --db-root-password="${MYSQL_ROOT_PASSWORD}" \
+          --install-app erpnext \
+          --install-app payments
+        
+        echo "=== Site creation completed successfully! ==="
+    environment:
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+
+  websocket:
+    <<: *common
+    depends_on:
+      create-site:
+        condition: service_completed_successfully
+    command: ["node", "/home/frappe/frappe-bench/apps/frappe/socketio.js"]
+
+  frontend:
+    <<: *common
+    depends_on:
+      - backend
+      - websocket
+    deploy:
+      restart_policy:
+        condition: on-failure
+    command:
+      - nginx-entrypoint.sh
+    environment:
+      BACKEND: backend:8000
+      SOCKETIO: websocket:${SOCKETIO_PORT}
+      UPSTREAM_REAL_IP_ADDRESS: 127.0.0.1
+      UPSTREAM_REAL_IP_HEADER: X-Forwarded-For
+      UPSTREAM_REAL_IP_RECURSIVE: "off"
+      PROXY_READ_TIMEOUT: 120
+      CLIENT_MAX_BODY_SIZE: 50m
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+    ports:
+      - "8080:8080"
+
+  queue-short:
+    <<: *common
+    depends_on:
+      create-site:
+        condition: service_completed_successfully
+    command: ["bench", "worker", "--queue", "short,default"]
+    environment:
+      DB_HOST: ${DB_HOST}
+      DB_PORT: ${DB_PORT}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      
+  queue-long:
+    <<: *common
+    depends_on:
+      create-site:
+        condition: service_completed_successfully
+    command: ["bench", "worker", "--queue", "long,default,short"]
+
+    environment:
+      DB_HOST: ${DB_HOST}
+      DB_PORT: ${DB_PORT}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+
+  scheduler:
+    <<: *common
+    depends_on:
+      create-site:
+        condition: service_completed_successfully
+    command: ["bench", "schedule"]
+
+    environment:
+      DB_HOST: ${DB_HOST}
+      DB_PORT: ${DB_PORT}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+
+  db:
+    image: mariadb:10.6
+    restart: unless-stopped
+    networks:
+      - frappe_network
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+    volumes:
+      - db-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 5s
+      retries: 20
+
+  redis-cache:
+    image: redis:6.2-alpine
+    restart: unless-stopped
+    networks:
+      - frappe_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      retries: 10
+
+  redis-queue:
+    image: redis:6.2-alpine
+    restart: unless-stopped
+    networks:
+      - frappe_network
+    volumes:
+      - redis-queue-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      retries: 10
+
+volumes:
+  db-data:
+  redis-queue-data:
+  sites:
+  logs:
+
+networks:
+  frappe_network:
+    driver: bridge
