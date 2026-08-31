@@ -1,27 +1,49 @@
+x-restart-policy: &restart-policy
+  restart: unless-stopped
+
+x-logging: &default-logging
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
 
 x-common: &common
-  build:
-    context: ./builder/
-  restart: unless-stopped
+  image: ${FRAPPE_IMAGE:-yourregistry/erpnext-custom}:${IMAGE_TAG:?IMAGE_TAG must be set}
+  <<: [*restart-policy, *default-logging]
   networks:
     - frappe_network
   volumes:
     - sites:/home/frappe/frappe-bench/sites
     - logs:/home/frappe/frappe-bench/logs
 
+# Common dependency block: every long-running app service must wait for
+# the database and both redis instances to be healthy, AND for the
+# one-shot `setup` service to have finished writing common_site_config.json.
+# `service_completed_successfully` requires Docker Compose v2.20+ — check
+# `docker compose version` on your host before relying on this.
+x-app-depends: &app-depends
+  depends_on:
+    db:
+      condition: service_healthy
+    redis-cache:
+      condition: service_healthy
+    redis-queue:
+      condition: service_healthy
+    setup:
+      condition: service_completed_successfully
+
 services:
   backend:
-    <<: *common
-    depends_on:
-      redis-cache:
-        condition: service_healthy
-      redis-queue:
-        condition: service_healthy
+    <<: [*common, *app-depends]
     environment:
       DB_HOST: ${DB_HOST}
       DB_PORT: ${DB_PORT}
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
       MARIADB_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+    mem_limit: ${BACKEND_MEM_LIMIT:-2g}
+    mem_reservation: ${BACKEND_MEM_RESERVATION:-1g}
+    cpus: ${BACKEND_CPUS:-1.5}
 
   setup:
     <<: *common
@@ -38,32 +60,32 @@ services:
       - -c
       - |
         set -e
-        echo " Starting Frappe Configuration Setup ==="
-        
+        echo "=== Starting Frappe Configuration Setup ==="
+
         # List apps
         ls -1 apps > sites/apps.txt
         echo "Apps listed in sites/apps.txt"
-        
+
         # Configure database
         echo "Setting db_host to: ${DB_HOST}"
         bench set-config -g db_host "${DB_HOST}"
-        
+
         echo "Setting db_port to: ${DB_PORT}"
         bench set-config -gp db_port "${DB_PORT}"
-        
+
         # Configure Redis
         echo "Setting redis_cache to: redis://${REDIS_CACHE}"
         bench set-config -g redis_cache "redis://${REDIS_CACHE}"
-        
+
         echo "Setting redis_queue to: redis://${REDIS_QUEUE}"
         bench set-config -g redis_queue "redis://${REDIS_QUEUE}"
-        
+
         echo "Setting redis_socketio to: redis://${REDIS_QUEUE}"
         bench set-config -g redis_socketio "redis://${REDIS_QUEUE}"
-        
+
         echo "Setting socketio_port to: ${SOCKETIO_PORT}"
         bench set-config -gp socketio_port "${SOCKETIO_PORT}"
-        
+
         echo "=== Configuration Complete ==="
         echo "Contents of common_site_config.json:"
         cat sites/common_site_config.json
@@ -73,24 +95,28 @@ services:
       REDIS_CACHE: ${REDIS_CACHE}
       REDIS_QUEUE: ${REDIS_QUEUE}
       SOCKETIO_PORT: ${SOCKETIO_PORT}
+    mem_limit: ${SETUP_MEM_LIMIT:-512m}
+    cpus: ${SETUP_CPUS:-0.5}
 
   websocket:
-    <<: *common
+    <<: [*common, *app-depends]
     command: ["node", "/home/frappe/frappe-bench/apps/frappe/socketio.js"]
+    mem_limit: ${WEBSOCKET_MEM_LIMIT:-512m}
+    mem_reservation: ${WEBSOCKET_MEM_RESERVATION:-256m}
+    cpus: ${WEBSOCKET_CPUS:-0.5}
 
   frontend:
     <<: *common
     depends_on:
-      - backend
-      - websocket
-    deploy:
-      restart_policy:
-        condition: on-failure
+      backend:
+        condition: service_started
+      websocket:
+        condition: service_started
     command:
       - nginx-entrypoint.sh
     environment:
       BACKEND: backend:8000
-      SOCKETIO: ${SOCKETIO_PORT} 
+      SOCKETIO: ${SOCKETIO_PORT}
       UPSTREAM_REAL_IP_ADDRESS: 127.0.0.1
       UPSTREAM_REAL_IP_HEADER: X-Forwarded-For
       UPSTREAM_REAL_IP_RECURSIVE: "off"
@@ -100,37 +126,45 @@ services:
       - sites:/home/frappe/frappe-bench/sites
       - logs:/home/frappe/frappe-bench/logs
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
+    mem_limit: ${FRONTEND_MEM_LIMIT:-512m}
+    cpus: ${FRONTEND_CPUS:-0.5}
 
   queue-short:
-    <<: *common
+    <<: [*common, *app-depends]
     command: ["bench", "worker", "--queue", "short,default"]
     environment:
       DB_HOST: ${DB_HOST}
       DB_PORT: ${DB_PORT}
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
-      
-  queue-long:
-    <<: *common
-    command: ["bench", "worker", "--queue", "long,default,short"]
+    mem_limit: ${QUEUE_SHORT_MEM_LIMIT:-1g}
+    mem_reservation: ${QUEUE_SHORT_MEM_RESERVATION:-512m}
+    cpus: ${QUEUE_SHORT_CPUS:-1}
 
+  queue-long:
+    <<: [*common, *app-depends]
+    command: ["bench", "worker", "--queue", "long,default,short"]
     environment:
       DB_HOST: ${DB_HOST}
       DB_PORT: ${DB_PORT}
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+    mem_limit: ${QUEUE_LONG_MEM_LIMIT:-1g}
+    mem_reservation: ${QUEUE_LONG_MEM_RESERVATION:-512m}
+    cpus: ${QUEUE_LONG_CPUS:-1}
 
   scheduler:
-    <<: *common
+    <<: [*common, *app-depends]
     command: ["bench", "schedule"]
-
     environment:
       DB_HOST: ${DB_HOST}
       DB_PORT: ${DB_PORT}
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+    mem_limit: ${SCHEDULER_MEM_LIMIT:-512m}
+    cpus: ${SCHEDULER_CPUS:-0.5}
 
   db:
     image: mariadb:10.6
-    restart: unless-stopped
+    <<: [*restart-policy, *default-logging]
     networks:
       - frappe_network
     command:
@@ -143,21 +177,28 @@ services:
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${MYSQL_ROOT_PASSWORD}"]
       interval: 5s
+      timeout: 5s
       retries: 20
+    mem_limit: ${DB_MEM_LIMIT:-2g}
+    mem_reservation: ${DB_MEM_RESERVATION:-1g}
+    cpus: ${DB_CPUS:-2}
 
   redis-cache:
     image: redis:6.2-alpine
-    restart: unless-stopped
+    <<: [*restart-policy, *default-logging]
     networks:
       - frappe_network
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 3s
+      timeout: 3s
       retries: 10
+    mem_limit: ${REDIS_CACHE_MEM_LIMIT:-256m}
+    cpus: ${REDIS_CACHE_CPUS:-0.5}
 
   redis-queue:
     image: redis:6.2-alpine
-    restart: unless-stopped
+    <<: [*restart-policy, *default-logging]
     networks:
       - frappe_network
     volumes:
@@ -165,7 +206,10 @@ services:
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 3s
+      timeout: 3s
       retries: 10
+    mem_limit: ${REDIS_QUEUE_MEM_LIMIT:-256m}
+    cpus: ${REDIS_QUEUE_CPUS:-0.5}
 
 volumes:
   db-data:
