@@ -33,6 +33,22 @@ x-app-depends: &app-depends
     setup:
       condition: service_completed_successfully
 
+# Custom app env vars. NOTE: YAML merge keys (<<:) do NOT deep-merge nested
+# maps — if a service already defines its own `environment:` block, merging
+# this anchor in via `<<: [..., *app-env]` will NOT combine the two; the
+# service's own `environment:` block simply wins and these vars are silently
+# dropped. That's why below, every service's `environment:` block manually
+# repeats these vars alongside its own. Add new app vars here AND copy them
+# into each service's environment block that needs them.
+x-app-env: &app-env
+  LH_OBS_ENDPOINT: ${LH_OBS_ENDPOINT}
+  LH_OBS_BUCKET_NAME: ${LH_OBS_BUCKET_NAME}
+  LH_OBS_ACCESS_KEY: ${LH_OBS_ACCESS_KEY}
+  LH_OBS_SECRET_KEY: ${LH_OBS_SECRET_KEY}
+  LH_OBS_SECURE: ${LH_OBS_SECURE}
+  CHAPA_SECRET_KEY: ${CHAPA_SECRET_KEY}
+  CHAPA_PUBLIC_KEY: ${CHAPA_PUBLIC_KEY}
+
 services:
   backend:
     <<: [*common, *app-depends]
@@ -41,6 +57,7 @@ services:
       DB_PORT: ${DB_PORT}
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
       MARIADB_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      <<: *app-env
     mem_limit: ${BACKEND_MEM_LIMIT:-2g}
     mem_reservation: ${BACKEND_MEM_RESERVATION:-1g}
     cpus: ${BACKEND_CPUS:-1.5}
@@ -95,12 +112,15 @@ services:
       REDIS_CACHE: ${REDIS_CACHE}
       REDIS_QUEUE: ${REDIS_QUEUE}
       SOCKETIO_PORT: ${SOCKETIO_PORT}
+      <<: *app-env
     mem_limit: ${SETUP_MEM_LIMIT:-512m}
     cpus: ${SETUP_CPUS:-0.5}
 
   websocket:
     <<: [*common, *app-depends]
     command: ["node", "/home/frappe/frappe-bench/apps/frappe/socketio.js"]
+    environment:
+      <<: *app-env
     mem_limit: ${WEBSOCKET_MEM_LIMIT:-512m}
     mem_reservation: ${WEBSOCKET_MEM_RESERVATION:-256m}
     cpus: ${WEBSOCKET_CPUS:-0.5}
@@ -122,6 +142,7 @@ services:
       UPSTREAM_REAL_IP_RECURSIVE: "off"
       PROXY_READ_TIMEOUT: 120
       CLIENT_MAX_BODY_SIZE: 50m
+      <<: *app-env
     volumes:
       - sites:/home/frappe/frappe-bench/sites
       - logs:/home/frappe/frappe-bench/logs
@@ -137,6 +158,7 @@ services:
       DB_HOST: ${DB_HOST}
       DB_PORT: ${DB_PORT}
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      <<: *app-env
     mem_limit: ${QUEUE_SHORT_MEM_LIMIT:-1g}
     mem_reservation: ${QUEUE_SHORT_MEM_RESERVATION:-512m}
     cpus: ${QUEUE_SHORT_CPUS:-1}
@@ -148,6 +170,7 @@ services:
       DB_HOST: ${DB_HOST}
       DB_PORT: ${DB_PORT}
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      <<: *app-env
     mem_limit: ${QUEUE_LONG_MEM_LIMIT:-1g}
     mem_reservation: ${QUEUE_LONG_MEM_RESERVATION:-512m}
     cpus: ${QUEUE_LONG_CPUS:-1}
@@ -159,6 +182,7 @@ services:
       DB_HOST: ${DB_HOST}
       DB_PORT: ${DB_PORT}
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      <<: *app-env
     mem_limit: ${SCHEDULER_MEM_LIMIT:-512m}
     cpus: ${SCHEDULER_CPUS:-0.5}
 
