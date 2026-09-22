@@ -103,6 +103,12 @@ services:
         echo "Setting socketio_port to: ${SOCKETIO_PORT}"
         bench set-config -gp socketio_port "${SOCKETIO_PORT}"
 
+        echo "Setting Gunicorn Workersto : ${GUNICORN_WORKERS}"
+        bench set-config -gp gunicorn_workers ${GUNICORN_WORKERS}
+
+        echo "Setting CORS "
+        bench set-config -g allow_cors "*"
+
         echo "=== Configuration Complete ==="
         echo "Contents of common_site_config.json:"
         cat sites/common_site_config.json
@@ -136,7 +142,7 @@ services:
       - nginx-entrypoint.sh
     environment:
       BACKEND: backend:8000
-      SOCKETIO: ${SOCKETIO_PORT}
+      SOCKETIO: websocket:${SOCKETIO_PORT} 
       UPSTREAM_REAL_IP_ADDRESS: 127.0.0.1
       UPSTREAM_REAL_IP_HEADER: X-Forwarded-For
       UPSTREAM_REAL_IP_RECURSIVE: "off"
