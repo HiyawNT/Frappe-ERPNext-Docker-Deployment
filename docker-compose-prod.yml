@@ -106,6 +106,9 @@ services:
         echo "Setting Gunicorn Workersto : ${GUNICORN_WORKERS}"
         bench set-config -gp gunicorn_workers ${GUNICORN_WORKERS}
 
+        echo "Setting Redis workers to: ${BACKGROUND_WORKERS}"
+        bench set-config -gp background_workers ${BACKGROUND_WORKERS}
+
         echo "Setting CORS "
         bench set-config -g allow_cors "*"
 
@@ -118,6 +121,8 @@ services:
       REDIS_CACHE: ${REDIS_CACHE}
       REDIS_QUEUE: ${REDIS_QUEUE}
       SOCKETIO_PORT: ${SOCKETIO_PORT}
+      GUNICORN_WORKERS: ${GUNICORN_WORKERS}
+      BACKGROUND_WORKERS: ${BACKGROUND_WORKERS}
       <<: *app-env
     mem_limit: ${SETUP_MEM_LIMIT:-512m}
     cpus: ${SETUP_CPUS:-0.5}
