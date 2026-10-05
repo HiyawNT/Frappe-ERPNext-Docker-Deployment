@@ -17,11 +17,6 @@ x-common: &common
     - sites:/home/frappe/frappe-bench/sites
     - logs:/home/frappe/frappe-bench/logs
 
-# Common dependency block: every long-running app service must wait for
-# the database and both redis instances to be healthy, AND for the
-# one-shot `setup` service to have finished writing common_site_config.json.
-# `service_completed_successfully` requires Docker Compose v2.20+ — check
-# `docker compose version` on your host before relying on this.
 x-app-depends: &app-depends
   depends_on:
     db:
@@ -33,13 +28,6 @@ x-app-depends: &app-depends
     setup:
       condition: service_completed_successfully
 
-# Custom app env vars. NOTE: YAML merge keys (<<:) do NOT deep-merge nested
-# maps — if a service already defines its own `environment:` block, merging
-# this anchor in via `<<: [..., *app-env]` will NOT combine the two; the
-# service's own `environment:` block simply wins and these vars are silently
-# dropped. That's why below, every service's `environment:` block manually
-# repeats these vars alongside its own. Add new app vars here AND copy them
-# into each service's environment block that needs them.
 x-app-env: &app-env
   LH_OBS_ENDPOINT: ${LH_OBS_ENDPOINT}
   LH_OBS_BUCKET_NAME: ${LH_OBS_BUCKET_NAME}
