@@ -234,6 +234,40 @@ services:
     mem_limit: ${REDIS_QUEUE_MEM_LIMIT:-256m}
     cpus: ${REDIS_QUEUE_CPUS:-0.5}
 
+  waf:
+    image: owasp/modsecurity-crs:4.25-nginx-lts 
+    <<: *restart-policy
+    networks:
+      - frappe_network
+    depends_on:
+      frontend:
+        condition: service_started
+    environment:
+      BACKEND: http://frontend:8080
+      MODSEC_RULE_ENGINE: On
+      BLOCKING_PARANOIA: 1
+      ALLOWED_METHODS: "GET HEAD POST OPTIONS PUT DELETE"
+      MODSEC_REQ_BODY_LIMIT: 52428800          # match frontend's 50m
+      MODSEC_REQ_BODY_NOFILES_LIMIT: 2097152
+      MODSEC_RESP_BODY_ACCESS: "Off"
+      SKIP_RESPONSE_ANALYSIS: 1
+      PROXY_TIMEOUT: 120s                    
+      CLIENT_BODY_TIMEOUT: 60s                
+      SET_REAL_IP_FROM: 172.16.0.0/12          
+      REAL_IP_HEADER: X-Forwarded-For
+      REAL_IP_PROXY_HEADER: X-Forwarded-For
+      MODSEC_AUDIT_LOG_PARTS: "ABFHZ" 
+    volumes:
+      - ./waf/REQUEST-900-EXCLUSION-RULES-BEFORE-CRS.conf:/etc/modsecurity.d/owasp-crs/rules/REQUEST-900-EXCLUSION-RULES-BEFORE-CRS.conf:ro
+      - ./waf/RESPONSE-999-EXCLUSION-RULES-AFTER-CRS.conf:/etc/modsecurity.d/owasp-crs/rules/RESPONSE-999-EXCLUSION-RULES-AFTER-CRS.conf:ro
+    ports:
+      - "127.0.0.1:8081:8080"
+    logging:
+      driver: json-file
+      options: { max-size: "50m", max-file: "5" }   # detection-only is chatty
+    mem_limit: ${WAF_MEM_LIMIT:-512m}
+    cpus: ${WAF_CPUS:-1}
+
 volumes:
   db-data:
   redis-queue-data:

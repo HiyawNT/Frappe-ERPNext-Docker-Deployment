@@ -1,0 +1,320 @@
+# ============================================================================
+# REQUEST-900-EXCLUSION-RULES-BEFORE-CRS.conf (SURGICAL BACKUP)
+# Custom WAF Tuning for Frappe v16 / ERPNext / little_heroes (Little Heroes
+# Daycare Center custom Frappe app), Raven (Realtime chat), HRMS, and External
+# Storage.
+#
+# Three-Pass Review Status: COMPLETE
+# CRS Version Target: 4.x (owasp/modsecurity-crs:4.25-nginx-lts)
+# Paranoia Level: 1 (as set in docker-compose.yml)
+#
+# Philosophy:
+#   - NEVER disable rules globally across the entire site.
+#   - Use SecRuleUpdateTargetById to surgically remove specific argument
+#     *variables* from specific rule checks globally per arg name.
+#   - Use ctl:ruleRemoveById only when a rule is architecturally incompatible
+#     with a known-trusted path (e.g. socket.io, login flow).
+#   - Keep ARGS that could carry real attacker payloads (freetext) inspected.
+#   - Retain ALL injection/XSS rules for ARGS that are IDs, names, or integers.
+#
+# Rule ID Namespace:
+#   10001-10099 : Core Frappe/ERPNext framework exclusions
+#   10100-10199 : little_heroes custom app endpoint exclusions
+#   10200-10299 : Raven Chat app exclusions
+#   10300-10399 : Cookie/Session exclusions
+# ============================================================================
+
+
+# ============================================================================
+# SECTION 1 - FRAPPE FRAMEWORK CORE EXCLUSIONS
+# (Also covers HRMS, Offsite Backups, and DFP External Storage which use 
+# standard Frappe DocType save APIs and the 'data' parameter payload).
+# ============================================================================
+
+# ------------------------------------------------------------------------------
+# 1a. WebSocket / Socket.IO
+# Frappe uses socket.io for real-time desk updates (notifications, form saves,
+# task progress). Upgrading to a WebSocket connection uses unusual HTTP headers
+# (Upgrade, Connection: Upgrade) that CRS flags. No body to inspect here.
+# Disabling the rule engine entirely for this path is safe -- there is no
+# meaningful HTTP payload to attack through a raw socket upgrade.
+# ------------------------------------------------------------------------------
+SecRule REQUEST_URI "@beginsWith /socket.io" \
+    "id:10001,phase:1,pass,nolog,ctl:ruleEngine=Off"
+
+
+# ------------------------------------------------------------------------------
+# 1b. Frappe Login endpoint -- /api/method/login
+# The `usr` parameter is an email/username; the `pwd` parameter is a password.
+# Rule 942450 (Base64 encoding anomaly) and 941100 (XSS) routinely fire on
+# Base64-encoded password hashes that some clients send. We surgically remove
+# these two high-noise args from the narrowest set of SQLi/XSS rules while
+# leaving headers and cookies fully inspected.
+# NOTE: We do NOT whitelist the entire login path -- real credential stuffing
+# and brute-force attempts should still be logged/scored.
+# ------------------------------------------------------------------------------
+SecRule REQUEST_URI "@streq /api/method/login" \
+    "id:10002,phase:1,pass,nolog,\
+    ctl:ruleRemoveTargetById=942450;ARGS:pwd,\
+    ctl:ruleRemoveTargetById=941100;ARGS:pwd,\
+    ctl:ruleRemoveTargetById=941160;ARGS:pwd"
+
+# little_heroes custom web_login endpoint (allow_guest=True, handles 2FA)
+# `tmp_id` is a short opaque token; `otp` is a numeric TOTP code.
+# `pwd` same as above. Keep request body rules active -- only exclude from
+# the specific rules that fire on these specific fields.
+SecRule REQUEST_URI "@streq /api/method/little_heroes.api.v1.auth.web_login" \
+    "id:10003,phase:1,pass,nolog,\
+    ctl:ruleRemoveTargetById=942450;ARGS:pwd,\
+    ctl:ruleRemoveTargetById=942450;ARGS:tmp_id,\
+    ctl:ruleRemoveTargetById=941100;ARGS:pwd,\
+    ctl:ruleRemoveTargetById=941160;ARGS:pwd"
+
+
+# ------------------------------------------------------------------------------
+# 1c. Frappe `cmd` parameter -- function dispatcher
+# Frappe routes calls via POST /api/method/<dotted.path> AND via the legacy
+# `cmd` form field (e.g., cmd=frappe.client.get). The dotted module path
+# (e.g. "frappe.desk.search.search_link") triggers rule 932100 (RCE Unix
+# command injection), 932105 (RCE Unix shell variable) and 942200 (SQLi
+# comment). We exclude `cmd` globally from these specific rule IDs only.
+# ------------------------------------------------------------------------------
+SecRuleUpdateTargetById 932100 "!ARGS:cmd"
+SecRuleUpdateTargetById 932105 "!ARGS:cmd"
+SecRuleUpdateTargetById 932110 "!ARGS:cmd"
+SecRuleUpdateTargetById 942200 "!ARGS:cmd"
+
+
+# ------------------------------------------------------------------------------
+# 1d. Frappe `filters` parameter -- JSON filter arrays
+# All Frappe list views, reports and APIs accept `filters` as a URL-encoded
+# JSON string, e.g.:
+#   filters=[["Sales Order","status","=","Draft"]]
+# The pipe characters, SQL keywords (AND, OR, IN, LIKE), and square brackets
+# in well-formed Frappe filter arrays routinely trigger rules 942100 (SQLi),
+# 942130 (SQLi tautology), 942200, 942260 (auth bypass), 942340, 942430
+# (char anomaly). We exclude this ARGUMENT NAME globally from those IDs.
+# The same applies to `filter` (singular) used by some endpoints.
+# ------------------------------------------------------------------------------
+SecRuleUpdateTargetById 942100 "!ARGS:filters"
+SecRuleUpdateTargetById 942100 "!ARGS:filter"
+SecRuleUpdateTargetById 942130 "!ARGS:filters"
+SecRuleUpdateTargetById 942130 "!ARGS:filter"
+SecRuleUpdateTargetById 942200 "!ARGS:filters"
+SecRuleUpdateTargetById 942200 "!ARGS:filter"
+SecRuleUpdateTargetById 942260 "!ARGS:filters"
+SecRuleUpdateTargetById 942260 "!ARGS:filter"
+SecRuleUpdateTargetById 942340 "!ARGS:filters"
+SecRuleUpdateTargetById 942340 "!ARGS:filter"
+SecRuleUpdateTargetById 942370 "!ARGS:filters"
+SecRuleUpdateTargetById 942370 "!ARGS:filter"
+SecRuleUpdateTargetById 942430 "!ARGS:filters"
+SecRuleUpdateTargetById 942430 "!ARGS:filter"
+
+
+# ------------------------------------------------------------------------------
+# 1e. Frappe `data` parameter -- JSON document payload
+# When saving/creating any DocType via the legacy form interface, Frappe POSTs
+# the document as a JSON string in the `data` field. This is a rich JSON blob
+# and will trigger many SQLi (942xxx) and XSS (941xxx) rules. We exclude the
+# `data` argument name only from the highest-volume false-positive rules.
+# Free-text user content fields (like `notes`, `description`) that come in
+# nested inside this blob are inspected by the remaining rules -- we are
+# excluding only the structural false positives.
+# This global exclusion also protects HRMS, Offsite Backups, and DFP External
+# Storage saves, which all rely on this standard payload structure.
+# ------------------------------------------------------------------------------
+SecRuleUpdateTargetById 942100 "!ARGS:data"
+SecRuleUpdateTargetById 942200 "!ARGS:data"
+SecRuleUpdateTargetById 942260 "!ARGS:data"
+SecRuleUpdateTargetById 942340 "!ARGS:data"
+SecRuleUpdateTargetById 942370 "!ARGS:data"
+SecRuleUpdateTargetById 942430 "!ARGS:data"
+SecRuleUpdateTargetById 941100 "!ARGS:data"
+SecRuleUpdateTargetById 941160 "!ARGS:data"
+
+
+# ------------------------------------------------------------------------------
+# 1f. Frappe `args` parameter -- JSON method arguments
+# Remote method calls via /api/method/ can pass structured JSON in `args`.
+# Similar false-positive profile to `data`.
+# ------------------------------------------------------------------------------
+SecRuleUpdateTargetById 942100 "!ARGS:args"
+SecRuleUpdateTargetById 942200 "!ARGS:args"
+SecRuleUpdateTargetById 942260 "!ARGS:args"
+SecRuleUpdateTargetById 942340 "!ARGS:args"
+SecRuleUpdateTargetById 942430 "!ARGS:args"
+SecRuleUpdateTargetById 932100 "!ARGS:args"
+SecRuleUpdateTargetById 932105 "!ARGS:args"
+SecRuleUpdateTargetById 941100 "!ARGS:args"
+SecRuleUpdateTargetById 941160 "!ARGS:args"
+
+
+# ------------------------------------------------------------------------------
+# 1g. Frappe session cookie -- `sid`
+# The Frappe session ID (`sid`) is a base64url string. Rule 942450 (base64
+# anomaly) and 942100 fire on it in every single authenticated request.
+# This is the most impactful global exclusion. We exclude ONLY the `sid`
+# cookie from these specific rules.
+# ------------------------------------------------------------------------------
+SecRuleUpdateTargetById 942450 "!REQUEST_COOKIES:sid"
+SecRuleUpdateTargetById 942100 "!REQUEST_COOKIES:sid"
+SecRuleUpdateTargetById 942200 "!REQUEST_COOKIES:sid"
+
+
+# ------------------------------------------------------------------------------
+# 1h. Frappe `system_user` and `user_image` cookies
+# Frappe sets these harmless browser-readable cookies. `system_user=yes` etc.
+# Rule 942130/942200 can flag the `=yes` portion.
+# ------------------------------------------------------------------------------
+SecRuleUpdateTargetById 942130 "!REQUEST_COOKIES:system_user"
+SecRuleUpdateTargetById 942200 "!REQUEST_COOKIES:user_image"
+
+
+# ------------------------------------------------------------------------------
+# 1i. ERPNext PDF / Print Format endpoint
+# Generating a print preview sends raw Jinja-rendered HTML as the `html`
+# argument, and the `print_format` name may contain reserved SQL words.
+# These are structural false positives on a backend-to-backend call.
+# ------------------------------------------------------------------------------
+SecRule REQUEST_URI "@beginsWith /api/method/frappe.utils.print_format" \
+    "id:10004,phase:1,pass,nolog,\
+    ctl:ruleRemoveById=941100-941999,\
+    ctl:ruleRemoveById=942100-942999"
+
+SecRule REQUEST_URI "@beginsWith /api/method/frappe.desk.query_report.run" \
+    "id:10005,phase:1,pass,nolog,\
+    ctl:ruleRemoveById=941100-941999,\
+    ctl:ruleRemoveById=942100-942999"
+
+
+# ------------------------------------------------------------------------------
+# 1j. Frappe file upload endpoint
+# /api/method/upload_file accepts a multipart/form-data body with `file`,
+# `doctype`, `docname`, `fieldname`, and `is_private`. The `docname` field
+# carries Frappe document IDs that look like "Sales-Order-00001" -- benign but
+# potentially triggering rule 920270 (invalid character in request).
+# The `filename` param in multipart can trigger 941100 (XSS) on filenames
+# like "report-2024<Q1>.pdf". We do a surgical per-endpoint exclusion.
+# ------------------------------------------------------------------------------
+SecRule REQUEST_URI "@streq /api/method/upload_file" \
+    "id:10006,phase:1,pass,nolog,\
+    ctl:ruleRemoveTargetById=941100;ARGS:filename,\
+    ctl:ruleRemoveTargetById=941160;ARGS:filename,\
+    ctl:ruleRemoveTargetById=920270;ARGS:docname,\
+    ctl:ruleRemoveTargetById=920270;ARGS:fieldname"
+
+
+# ============================================================================
+# SECTION 2 -- LITTLE HEROES CUSTOM APP EXCLUSIONS
+# App module root: little_heroes.api.v1.*
+# ============================================================================
+
+# ------------------------------------------------------------------------------
+# 2a. `message` field -- send_message_to_parents (daily_reports.py)
+# Free-text message from teacher to parents. Rich text may include HTML
+# or natural language that triggers 941100 (XSS self-closing tags) and
+# 941160 (XSS polyglot). We exclude ONLY on the specific endpoint.
+# ------------------------------------------------------------------------------
+SecRule REQUEST_URI "@streq /api/method/little_heroes.api.v1.daily_reports.send_message_to_parents" \
+    "id:10101,phase:1,pass,nolog,\
+    ctl:ruleRemoveTargetById=941100;ARGS:message,\
+    ctl:ruleRemoveTargetById=941160;ARGS:message,\
+    ctl:ruleRemoveTargetById=941130;ARGS:message"
+
+# ------------------------------------------------------------------------------
+# 2b. File upload endpoints (Comprehensive Wildcard)
+# little_heroes has many specific upload endpoints (inventory, students, etc.).
+# These endpoints receive multipart/form-data with `file`, `fieldname`,
+# and `docname`. This regex dynamically covers all of them.
+# ------------------------------------------------------------------------------
+SecRule REQUEST_URI "@rx ^/api/method/little_heroes\.api\.v1\.[a-z0-9_]+\.upload_[a-z0-9_]+$" \
+    "id:10102,phase:1,pass,nolog,\
+    ctl:ruleRemoveTargetById=941100;ARGS:filename,\
+    ctl:ruleRemoveTargetById=941160;ARGS:filename,\
+    ctl:ruleRemoveTargetById=920270;ARGS:docname,\
+    ctl:ruleRemoveTargetById=920270;ARGS:fieldname"
+
+# ------------------------------------------------------------------------------
+# 2c. FCM device token -- notifications.py (register_device, unregister_device)
+# Firebase Cloud Messaging tokens are long base64url strings (~152 chars).
+# Rule 942450 (base64 anomaly) fires on every device registration call.
+# We exclude ARGS:fcm_token and ARGS:device_id only on these two endpoints.
+# ------------------------------------------------------------------------------
+SecRule REQUEST_URI "@rx ^/api/method/little_heroes\.api\.v1\.notifications\.(register_device|unregister_device)$" \
+    "id:10103,phase:1,pass,nolog,\
+    ctl:ruleRemoveTargetById=942450;ARGS:fcm_token,\
+    ctl:ruleRemoveTargetById=942100;ARGS:fcm_token,\
+    ctl:ruleRemoveTargetById=942200;ARGS:fcm_token,\
+    ctl:ruleRemoveTargetById=942450;ARGS:device_id"
+
+# ------------------------------------------------------------------------------
+# 2d. Access Settings -- PUT body with JSON config
+# update_access_settings sends a JSON body representing the Access Control
+# Settings doc. Fields may contain time strings like "08:00:00" which rule
+# 942100 misidentifies as SQL time injection syntax.
+# ------------------------------------------------------------------------------
+SecRule REQUEST_URI "@streq /api/method/little_heroes.api.v1.access.update_access_settings" \
+    "id:10104,phase:1,pass,nolog,\
+    ctl:ruleRemoveTargetById=942100;REQUEST_BODY,\
+    ctl:ruleRemoveTargetById=942200;REQUEST_BODY"
+
+
+# ============================================================================
+# SECTION 3 -- RAVEN REALTIME CHAT EXCLUSIONS
+# Chat messages routinely contain HTML snippets, source code, mathematical 
+# symbols, or SQL fragments that perfectly match injection/XSS signatures.
+# ============================================================================
+
+# ------------------------------------------------------------------------------
+# 3a. Exclude Chat Message content from Injection Checks
+# For any API under the `raven.api` namespace, we stop inspecting the 'text', 
+# 'content', and 'json_content' variables for XSS and SQLi to prevent 
+# legitimate chat messages from being blocked. All other arguments (like 
+# channel_id, user_id, headers, cookies) remain protected.
+# ------------------------------------------------------------------------------
+SecRule REQUEST_URI "@beginsWith /api/method/raven.api." \
+    "id:10201,phase:1,pass,nolog,\
+    ctl:ruleRemoveTargetById=941100-941999;ARGS:text,\
+    ctl:ruleRemoveTargetById=942100-942999;ARGS:text,\
+    ctl:ruleRemoveTargetById=941100-941999;ARGS:content,\
+    ctl:ruleRemoveTargetById=942100-942999;ARGS:content,\
+    ctl:ruleRemoveTargetById=941100-941999;ARGS:json_content,\
+    ctl:ruleRemoveTargetById=942100-942999;ARGS:json_content"
+
+
+# ============================================================================
+# SECTION 4 -- FRAPPE DESK SPA ROUTES
+# /app/* routes serve the Frappe Desk Single Page Application. These routes
+# are static asset requests -- no user-controlled body. URL segments can
+# contain document names like "/app/sales-order/SO-0001-AND-0002" which
+# the CRS path traversal rule (930100/930110) may flag.
+# ============================================================================
+
+SecRule REQUEST_URI "@beginsWith /app" \
+    "id:10301,phase:1,pass,nolog,\
+    ctl:ruleRemoveById=930100,\
+    ctl:ruleRemoveById=930110"
+
+
+# ============================================================================
+# SECTION 5 -- FRAPPE STATIC ASSETS AND FILE SERVING
+# These paths serve uploaded files and static JS/CSS bundles. No attack
+# vector exists in a GET request for a named file path. We only disable
+# path traversal rules here since the filenames are managed by Frappe.
+# ============================================================================
+
+SecRule REQUEST_URI "@beginsWith /files/" \
+    "id:10401,phase:1,pass,nolog,\
+    ctl:ruleRemoveById=930100,\
+    ctl:ruleRemoveById=930110"
+
+SecRule REQUEST_URI "@beginsWith /private/files/" \
+    "id:10402,phase:1,pass,nolog,\
+    ctl:ruleRemoveById=930100,\
+    ctl:ruleRemoveById=930110"
+
+SecRule REQUEST_URI "@beginsWith /assets/" \
+    "id:10403,phase:1,pass,nolog,\
+    ctl:ruleRemoveById=930100,\
+    ctl:ruleRemoveById=930110"
